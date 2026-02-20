@@ -1,0 +1,94 @@
+#!/bin/bash
+set -euo pipefail
+
+# Перед запуском:
+# export domain=vash-domen.tld
+if [[ -z "${domain:-}" ]]; then
+  echo "ERROR: domain не задан. Сделай: export domain=vash-domen.tld"
+  exit 1
+fi
+
+echo "Установка: Xray (VLESS + XHTTP) за Nginx (TLS на домене: $domain)"
+sleep 2
+
+apt update
+apt install -y curl wget nginx qrencode jq openssl
+
+# Установка acme.sh
+curl -fL https://get.acme.sh -o /tmp/acme_install.sh
+bash /tmp/acme_install.sh
+
+~/.acme.sh/acme.sh --upgrade --auto-upgrade
+
+mkdir -p /var/www/html
+systemctl enable --now nginx
+
+~/.acme.sh/acme.sh --issue --server letsencrypt -d "$domain" -w /var/www/html --keylength ec-256 --force
+
+mkdir -p /usr/local/etc/xray/xray_cert/
+
+~/.acme.sh/acme.sh --install-cert -d "$domain" --ecc   --fullchain-file /usr/local/etc/xray/xray_cert/xray.crt   --key-file       /usr/local/etc/xray/xray_cert/xray.key
+
+chmod +r /usr/local/etc/xray/xray_cert/xray.key
+
+# Установка Xray
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+UUID=$(xray uuid)
+PATH_RANDOM="/$(openssl rand -hex 6)/"
+SOCKET="/dev/shm/xhttp.socket"
+
+cat > /usr/local/etc/xray/config.json <<EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "listen": "$SOCKET,0666",
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "$UUID" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "none",
+        "xhttpSettings": { "path": "$PATH_RANDOM" }
+      }
+    }
+  ],
+  "outbounds": [{ "protocol": "freedom" }]
+}
+EOF
+
+cat > /etc/nginx/sites-available/default <<EOF
+server {
+  listen 80;
+  server_name $domain;
+  location /.well-known/acme-challenge/ { root /var/www/html; }
+  location / { return 301 https://\$host\$request_uri; }
+}
+
+server {
+  listen 443 ssl http2;
+  server_name $domain;
+
+  ssl_certificate     /usr/local/etc/xray/xray_cert/xray.crt;
+  ssl_certificate_key /usr/local/etc/xray/xray_cert/xray.key;
+
+  location $PATH_RANDOM {
+    grpc_pass unix:$SOCKET;
+  }
+
+  root /var/www/html;
+}
+EOF
+
+nginx -t
+systemctl restart nginx
+systemctl restart xray
+
+echo ""
+echo "===== ГОТОВО ====="
+echo "UUID: $UUID"
+echo "PATH: $PATH_RANDOM"
+echo "=================="

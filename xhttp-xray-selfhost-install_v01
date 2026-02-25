@@ -22,7 +22,10 @@ wget -O - https://get.acme.sh | sh
 
 # Для HTTP-01 нужен доступ к /var/www/html по 80 порту
 mkdir -p /var/www/html
-echo "ok" > /var/www/html/index.html
+# ничего не перезаписываем, просто если есть дефолтный файл nginx — используем его
+if [ -f /var/www/html/index.nginx-debian.html ]; then
+  mv /var/www/html/index.nginx-debian.html /var/www/html/index.html
+fi
 systemctl enable --now nginx
 
 ~/.acme.sh/acme.sh --issue --server letsencrypt -d "$domain" -w /var/www/html --keylength ec-256 --force
